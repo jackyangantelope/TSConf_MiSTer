@@ -1,0 +1,91 @@
+name: Compile MiSTer Core
+
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - 'README.md'
+      - 'releases/**'
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        
+      - name: Create Temporary .dockerignore
+        run: |
+          cat <<EOF > .dockerignore
+          [dD][oO][cC]
+          [dD][oO][cC][sS]
+          [rR]elease*
+          Dockerfile*
+          [lL][iI][cC][eE][nN][sS][eE]
+          [cC][Ll][eE][aA][nN].[bB][aA][tT]
+          palettes/
+          .dockerignore
+          .gitignore
+          **/.git
+          .git
+          .github
+          .DS_Store
+          *.[mM][rR][aA]
+          *.[rR][bB][fF]
+          *.[tT][xX][tT]
+          *.[mM][dD]
+          *.[pP][nN][gG]
+          *.[gG][iI][fF]
+          LatestBuild*.zip
+          EOF
+        
+      - name: Build Docker Image and Compile
+        run: |
+          cat <<EOF | docker build -t core-build -f - .
+          FROM theypsilon/quartus-lite-c5:17.0.2.docker0
+          WORKDIR /project
+          ADD . /project
+          RUN PROJECT_FILE=\$(find . -maxdepth 1 -name "*.qpf" | head -n 1) && \\
+              if [ -z "\$PROJECT_FILE" ]; then exit 1; fi && \\
+              PROJECT_NAME=\$(basename "\$PROJECT_FILE" .qpf) && \\
+              /opt/intelFPGA_lite/quartus/bin/quartus_sh --flow compile "\$PROJECT_NAME" && \\
+              BUILT_RBF=\$(find output_files -name "*.rbf" | head -n 1) && \\
+              if [ -z "\$BUILT_RBF" ] || [ ! -f "\$BUILT_RBF" ]; then exit 1; fi && \\
+              cp "\$BUILT_RBF" /project/output_files/core.rbf
+          CMD cat /project/output_files/core.rbf
+          EOF
+          
+      - name: Extract and Rename Artifact
+        run: |
+          CONTAINER_ID=$(docker create core-build)
+          
+          if [ -z "$CONTAINER_ID" ]; then
+            echo "::error::Failed to create container from image!"
+            exit 1
+          fi
+          
+          REPO_NAME="${{ github.event.repository.name }}"
+          # Strip '_MiSTer' suffix if present
+          CORE_NAME=$(echo "$REPO_NAME" | sed 's/_MiSTer$//')
+          DATE_TAG=$(date +%Y%m%d)
+          FINAL_RBF_NAME="${CORE_NAME}_${DATE_TAG}.rbf"
+          
+          docker cp $CONTAINER_ID:/project/output_files/core.rbf $FINAL_RBF_NAME
+          
+          if [ ! -f "$FINAL_RBF_NAME" ]; then
+            echo "::error::Failed to extract RBF file!"
+            docker rm $CONTAINER_ID
+            exit 1
+          fi
+          
+          docker rm $CONTAINER_ID
+          
+          echo "Artifact ready: $FINAL_RBF_NAME"
+          echo "ARTIFACT_PATH=$FINAL_RBF_NAME" >> $GITHUB_ENV
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Compiled-Core
+          path: ${{ env.ARTIFACT_PATH }}
